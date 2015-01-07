@@ -1,0 +1,456 @@
+####################################
+##FILL ME IN
+####################################
+## for a custom note with links:
+## !note =
+## for the canned note of "This tutorial assumes that you have completed the 
+## previous tutorials:" just add the links 
+## !note.0.link= 
+## descriptive title for the tutorial
+## title = Using a C++ class in Python
+## multi-line description to be displayed in search 
+## description = This tutorial illustrates a way to use a C++ class with ROS messages in Python.
+## the next tutorial description (optional)
+## !next =
+## links to next tutorial (optional)
+## !next.0.link=
+## !next.1.link=
+## what level user is this tutorial for 
+## level= AdvancedCategory
+## keywords = C++, Python, bindings
+####################################
+
+<<IncludeCSTemplate(TutorialCSHeaderTemplate)>>
+
+<<Buildsystem()>>
+
+<<TOC(4)>>
+
+This tutorial illustrates a way to use a C++ class with ROS messages in Python. The Boost Python library is used. The difficulty is to translate Python objects of ROS messages written in pure Python into equivalent C++ instances. This translation will be done through serialization/deserialization.
+
+== Class without NodeHandle ==
+
+Because roscpp is not initialized when calling `rospy.init_node`. `ros::NodeHandle` instances cannot be used in the C++ class without generating an error. If the C++ does not make use of `ros::NodeHandle`, this is no issue though.
+
+=== Creating the package and writing the C++ class ===
+
+Create a package and create the C++ class for which we will want to make a Python binding. This class uses ROS messages as arguments and return type.
+
+{{{{{#!wiki buildsystem rosbuild
+
+{{{
+#!shell
+roscreate-pkg # ... to be completed
+cd python_bindings_tutorial/include/python_bindings_tutorial
+touch add_two_ints.h
+rosed python_bindings_tutorial add_two_ints.h
+}}}
+
+}}}}}
+
+{{{{{#!wiki buildsystem catkin
+
+{{{
+#!shell
+catkin_create_pkg python_bindings_tutorial rospy roscpp std_msgs
+cd python_bindings_tutorial/include/python_bindings_tutorial
+touch add_two_ints.h
+rosed python_bindings_tutorial add_two_ints.h
+}}}
+
+}}}}}
+
+The content of add_two_ints.h will be:
+{{{
+#!cplusplus block=add_two_ints.h
+#ifndef PYTHON_BINDINGS_TUTORIAL_ADD_TWO_INTS_H
+#define PYTHON_BINDINGS_TUTORIAL_ADD_TWO_INTS_H
+
+#include <std_msgs/Int64.h>
+
+namespace python_bindings_tutorial {
+
+class AddTwoInts
+{
+  public:
+    std_msgs::Int64 add(const std_msgs::Int64& a, const std_msgs::Int64& b);
+};
+
+} // namespace python_bindings_tutorial
+
+#endif // PYTHON_BINDINGS_TUTORIAL_ADD_TWO_INTS_H
+}}}
+
+Write the class implementation.
+
+{{{
+roscd python_bindings_tutorial/src
+touch add_two_ints.cpp
+rosed python_bindings_tutorial add_two_ints.cpp
+}}}
+
+The content of add_two_ints.cpp will be:
+
+{{{
+#!cplusplus block=add_two_ints.cpp
+#include <python_bindings_tutorial/add_two_ints.h>
+
+using namespace python_bindings_tutorial;
+
+std_msgs::Int64 AddTwoInts::add(const std_msgs::Int64& a, const std_msgs::Int64& b)
+{
+  std_msgs::Int64 sum;
+  sum.data = a.data + b.data;
+  return sum;
+}
+}}}
+
+=== Binding, C++ part ===
+
+The binding occur through two wrapper classes, one in C++ and one in Python. The C++ wrapper translates input from serialized content to C++ message instances and output from C++ message instances into serialized content.
+
+{{{
+#!shell
+roscd python_bindings_tutorial/src
+touch add_two_ints_wrapper.cpp
+rosed python_bindings_tutorial add_two_ints_wrapper.cpp
+}}}
+
+The content of add_two_ints_wrapper.cpp will be:
+{{{
+#!cplusplus block=addtwointswrappercpp
+#include <boost/python.hpp>
+
+#include <string>
+
+#include <ros/serialization.h>
+#include <std_msgs/Int64.h>
+
+#include <python_bindings_tutorial/add_two_ints.h>
+
+/* Read a ROS message from a serialized string.
+  */
+template <typename M>
+M from_python(const std::string str_msg)
+{
+  size_t serial_size = str_msg.size();
+  boost::shared_array<uint8_t> buffer(new uint8_t[serial_size]);
+  for (size_t i = 0; i < serial_size; ++i)
+  {
+    buffer[i] = str_msg[i];
+  }
+  ros::serialization::IStream stream(buffer.get(), serial_size);
+  M msg;
+  ros::serialization::Serializer<M>::read(stream, msg);
+  return msg;
+}
+
+/* Write a ROS message into a serialized string.
+*/
+template <typename M>
+std::string to_python(const M& msg)
+{
+  size_t serial_size = ros::serialization::serializationLength(msg);
+  boost::shared_array<uint8_t> buffer(new uint8_t[serial_size]);
+  ros::serialization::OStream stream(buffer.get(), serial_size);
+  ros::serialization::serialize(stream, msg);
+  std::string str_msg;
+  str_msg.reserve(serial_size);
+  for (size_t i = 0; i < serial_size; ++i)
+  {
+    str_msg.push_back(buffer[i]);
+  }
+  return str_msg;
+}
+
+class AddTwoIntsWrapper : public python_bindings_tutorial::AddTwoInts
+{
+  public:
+    AddTwoIntsWrapper() : AddTwoInts() {}
+
+    std::string add(const std::string& str_a, const std::string& str_b)
+    {
+      std_msgs::Int64 a = from_python<std_msgs::Int64>(str_a);
+      std_msgs::Int64 b = from_python<std_msgs::Int64>(str_b);
+      std_msgs::Int64 sum = AddTwoInts::add(a, b);
+
+      return to_python(sum);
+    }
+};
+
+BOOST_PYTHON_MODULE(_add_two_ints_wrapper_cpp)
+{
+  boost::python::class_<AddTwoIntsWrapper>("AddTwoIntsWrapper", boost::python::init<>())
+    .def("add", &AddTwoIntsWrapper::add)
+    ;
+}
+}}}
+
+The line
+<<CodeRef(addtwointswrappercpp,60,60)>>
+creates a Python module in the form of a dynamic library. The name of the module will have to be the name of the exported library in `CMakeLists.txt`.
+
+=== Binding, Python part ===
+
+The Python wrapper translates input from Python message instances into serialized content and output from serialized content to Python message instances. The translation from Python serialized content (`str`) into C++ serialized content (`std::string`) is built in the Boost Python library.
+
+{{{
+roscd python_bindings_tutorial/src
+mkdir python_bindings_tutorial
+roscd python_bindings_tutorial/src/python_bindings_tutorial
+touch _add_two_ints_wrapper_py.py
+rosed python_bindings_tutorial _add_two_ints_wrapper_py.py
+}}}
+
+The content of _add_two_ints_wrapper_py.py will be
+{{{
+#!python block=_add_two_ints_wrapper_py.py
+from StringIO import StringIO
+
+import rospy
+from std_msgs.msg import Int64
+
+from python_bindings_tutorial._add_two_ints_wrapper_cpp import AddTwoIntsWrapper
+
+
+class AddTwoInts(object):
+    def __init__(self):
+        self._add_two_ints = AddTwoIntsWrapper()
+
+    def _to_cpp(self, msg):
+        """Return a serialized string from a ROS message
+
+        Parameters
+        ----------
+        - msg: a ROS message instance.
+        """
+        buf = StringIO()
+        msg.serialize(buf)
+        return buf.getvalue()
+
+    def _from_cpp(self, str_msg, cls):
+        """Return a ROS message from a serialized string
+
+        Parameters
+        ----------
+        - str_msg: str, serialized message
+        - cls: ROS message class, e.g. sensor_msgs.msg.LaserScan.
+        """
+        msg = cls()
+        return msg.deserialize(str_msg)
+
+    def add(self, a, b):
+        """Add two std_mgs/Int64 messages
+
+        Return a std_msgs/Int64 instance.
+
+        Parameters
+        ----------
+        - a: a std_msgs/Int64 instance.
+        - b: a std_msgs/Int64 instance.
+        """
+        if not isinstance(a, Int64):
+            rospy.ROSException('Argument 1 is not a std_msgs/Int64')
+        if not isinstance(b, Int64):
+            rospy.ROSException('Argument 2 is not a std_msgs/Int64')
+        str_a = self._to_cpp(a)
+        str_b = self._to_cpp(b)
+        str_sum = self._add_two_ints.add(str_a, str_b)
+        return self._from_cpp(str_sum, Int64)
+}}}
+
+In order to be able to import the class as `python_bindings_tutorial.AddTwoInts`, we import the symbols in `__init__.py`. First, we create the file:
+{{{
+#!shell
+roscd python_bindings_tutorial/src/python_bindings_tutorial
+touch __init__.py
+rosed python_bindings_tutorial __init__.py
+}}}
+
+The content of `__init__.py` will be:
+{{{
+#!python block=__init__.py
+from python_bindings_tutorial._add_two_ints_wrapper_py import AddTwoInts
+}}}
+
+=== Glueing everything together ===
+
+Edit the `CMakeLists.txt` (`rosed python_bindings_tutorial CmakeLists.txt`) like this:
+{{{{{#!wiki buildsystem rosbuild
+{{{
+Adapt CMakeLists.txt from the catkin version of this page.
+}}}
+}}}}}
+
+{{{{{#!wiki buildsystem catkin
+{{{
+#!cmake block=cmakeliststxt
+cmake_minimum_required(VERSION 2.8.3)
+project(python_bindings_tutorial)
+
+find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  roscpp_serialization
+  std_msgs
+)
+
+## Both Boost.python and Python libs are required.
+find_package(Boost REQUIRED COMPONENTS python)
+find_package(PythonLibs 2.7 REQUIRED)
+
+
+## Uncomment this if the package has a setup.py. This macro ensures
+## modules and global scripts declared therein get installed
+## See http://ros.org/doc/api/catkin/html/user_guide/setup_dot_py.html
+catkin_python_setup()
+
+###################################
+## catkin specific configuration ##
+###################################
+catkin_package(
+	INCLUDE_DIRS include
+	LIBRARIES add_two_ints _add_two_ints_wrapper_cpp
+	CATKIN_DEPENDS roscpp
+	#  DEPENDS system_lib
+)
+
+###########
+## Build ##
+###########
+
+# include Boost and Python.
+include_directories(
+	include 
+	${catkin_INCLUDE_DIRS}
+	${Boost_INCLUDE_DIRS}
+	${PYTHON_INCLUDE_DIRS}
+	)
+
+## Declare a cpp library
+add_library(add_two_ints src/add_two_ints.cpp)
+add_library(_add_two_ints_wrapper_cpp src/add_two_ints_wrapper.cpp)
+
+## Specify libraries to link a library or executable target against
+target_link_libraries(add_two_ints ${catkin_LIBRARIES})
+target_link_libraries(_add_two_ints_wrapper_cpp add_two_ints ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+
+# Don't prepend wrapper library name with lib and add to Python libs.
+set_target_properties(_add_two_ints_wrapper_cpp PROPERTIES
+	PREFIX ""
+	LIBRARY_OUTPUT_DIRECTORY ${CATKIN_DEVEL_PREFIX}/${CATKIN_PACKAGE_PYTHON_DESTINATION}
+	)
+}}}
+
+The c++ wrapper library should be have the same name as the Python module. If the target name needs to be different for a reason, the library name can be specified with
+`set_target_properties(_add_two_ints_wrapper_cpp PROPERTIES OUTPUT_NAME correct_library_name)`.
+
+The line
+<<CodeRef(cmakeliststxt,18,18)>>
+is used to export the Python module and is associated with the file `setup.py`
+
+}}}}}
+
+{{{
+#!shell
+roscd python_bindings_tutorial
+touch setup.py
+}}}
+
+The content of `setup.py` will be:
+{{{
+#!python
+# ! DO NOT MANUALLY INVOKE THIS setup.py, USE CATKIN INSTEAD
+
+from distutils.core import setup
+from catkin_pkg.python_setup import generate_distutils_setup
+
+# fetch values from package.xml
+setup_args = generate_distutils_setup(
+    packages=['python_bindings_tutorial'],
+    package_dir={'': 'src'})
+
+setup(**setup_args)
+}}}
+
+{{{{{#!wiki buildsystem rosbuild
+We then build the package with `rosmake`.
+}}}}}
+
+{{{{{#!wiki buildsystem catkin
+We then build the package with `catkin_make`.
+}}}}}
+=== Testing the binding ===
+
+You can now use the binding in Python script or in a Python shell
+{{{
+#!python
+from std_msgs.msg import Int64
+from python_bindings_tutorial import AddTwoInts
+a = Int64(4)
+b = Int64(2)
+addtwoints = AddTwoInts()
+sum = addtwoints.add(a, b)
+sum
+}}}
+
+
+== Class with NodeHandle ==
+
+As stated, a Python call to `rospy.init_node` does not initialize roscpp. If roscpp is not initialized, instanciating `ros::NodeHandle` will lead to a fatal error. A solution for this is provided by the [[http://moveit.ros.org|moveit_ros_planning_interface]]. In any Python script that uses the wrapped class, two lines need to be added before instanciating `AddTwoInts`:
+{{{
+#!python
+from moveit_ros_planning_interface._moveit_roscpp_initializer import roscpp_init
+roscpp_init('node_name', [])
+}}}
+
+This will create a ROS node.
+
+== Class with container of ROS messages ==
+
+If the class uses containers of ROS messages, an extra conversion step must be added. This step is not specific to ROS but is part of the Boost Python library.
+
+=== `std::vector<M>` as return type ===
+
+In the file where the C++ wrapper class is defined, add these lines:
+
+{{{
+#!cplusplus
+// Extracted from https://gist.github.com/avli/b0bf77449b090b768663.
+template<class T>
+struct vector_to_python
+{
+  static PyObject* convert(const std::vector<T>& vec)
+  {
+    boost::python::list* l = new boost::python::list();
+    for(std::size_t i = 0; i < vec.size(); i++)
+      (*l).append(vec[i]);
+
+    return l->ptr();
+  }
+};
+
+class Wrapper : public WrappedClass
+{
+/*
+...
+*/
+    std::vector<std::string> wrapper_fun(const std::string str_msg)
+    {
+      /* ... */
+    }
+
+};
+
+BOOST_PYTHON_MODULE(module_wrapper_cpp)
+{
+  boost::python::class_<Wrapper>("Wrapper", bp::init</* ... */>())
+    .def("fun", &Wrapper::wrapper_fun);
+
+  boost::python::to_python_converter<std::vector<std::string, std::allocator<std::string> >, vector_to_python<std::string> >();
+}
+}}}
+
+=== `std::vector<M>` as argument type ===
+
+Cf. Boost.Python documentation.
+
